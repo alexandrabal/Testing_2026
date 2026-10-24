@@ -1,0 +1,44 @@
+
+CREATE OR REPLACE VIEW meta_view_2026
+  AS (
+    SELECT
+        date,
+        EXTRACT(MONTH FROM "date")::int AS month,
+        EXTRACT(YEAR FROM "date")::int AS year,
+        campaign,
+         trim(split_part(campaign, '|', 1)) AS campaign_id,
+        adset, 
+        split_part(adset, '|', 1)  AS adset_id,
+        ad,
+        split_part(ad, '|', 1) AS ad_id,
+        CASE WHEN country = 'U.S' then 'United States' 
+           WHEN country = 'U.S.' then 'United States' 
+           WHEN country ='US' then 'United States' 
+           WHEN country ='AU' then 'Australia' 
+           WHEN country ='CA' then 'Canada'   
+          WHEN campaign ilike '%MT-AU%' then 'Australia'
+          WHEN campaign ilike '%MT-US%' then 'United States'
+          WHEN campaign ilike '%MT-CA%' then 'Canada'
+          WHEN campaign ilike '%US_M%' then 'United States'
+            else country END AS country_norm,
+        CASE WHEN campaign ILIKE '%android-tv%' THEN 'android-tv'
+           WHEN campaign ILIKE '%-IOS-%'      THEN 'ios'       
+           WHEN campaign ILIKE '%android%'
+               OR campaign ILIKE '%-AND-%'      THEN 'android'
+             ELSE 'Uncategorised' END AS os,
+      
+       'facebook' AS partner,
+        sum(spend) AS total_spend, 
+        sum(impressions) AS total_impressions,
+        sum(clicks) AS total_clicks,
+        0 AS total_installs,
+        0 AS total_purchases,
+        0 AS purchase_revenue,
+        0 AS day_0,
+        -- 0 AS roas_day_0,
+        0 AS day_30
+        -- 0 AS roas_day_0,
+    
+    FROM meta_raw_data 
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11)
+
