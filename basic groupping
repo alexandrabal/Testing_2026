@@ -1,0 +1,17 @@
+
+select distinct(country) from meta_raw_data  ---5 val, duplicates
+select distinct(country) from adjust_raw_data --mapping table/
+
+select distinct(partner) from meta_raw_data ---missing - will be facebook
+select distinct(partner) from adjust_raw_data  --2 values
+
+
+select distinct(os) from meta_raw_data  ---os missing - will take from campaign
+select distinct(os) from adjust_raw_data
+
+select distinct(campaign) from meta_raw_data ----13, can be different geo, partner, os 
+select distinct(campaign) from adjust_raw_data   ---69
+
+select distinct(campaign) ,country from meta_raw_data ----13, can be different geo, partner, os 
+select distinct(campaign)  from adjust_raw_data  where country in ('Australia', 'United States', 'Canada') ---51, no 1x1 relationship, 1 to many or some extra campaigns
+
