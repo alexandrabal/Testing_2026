@@ -1,0 +1,207 @@
+
+--------------------------------------------------------------------------------------------------
+---DATA FINDINGS: Meta contained only spend,cliks,and impression columns, while Adjust data source contained 
+---revenue metrics, and intalls, and purchases, I've decided to make a union of the two tbales and for the
+---missing metrics to add 0. I've checked NULLS, blanks, and 0% for each dataset, to familiarize myself
+---with the status of the data, and in case it is expected or not (can flag to client)
+
+--BEFORE UNION OF TABLES have checked if the Meta campaigns exist already in Adjust dataset, 
+
+--DUPLICATES not found, 
+--FORMAT issues, data was timestamp *unless intended for other use, join timestamp -with ga4 maybe useful
+--have converted date to date format. JSON format from Meta was converted as well. ALTERED tables
+--Have also checked for 
+---------------------------------------------------------------------------------------------------------------
+select 'meta_raw_data' as tablename, min(date) , max(date) from meta_raw_data    ---- June 2025 - to Aug 2025
+  union all 
+select 'adjust_raw_data' as tablename, min(date),max(date) from adjust_raw_data  ---- Jan 2025 - to Aug 2025
+--one campaign per row, date granularity both, missing cols in meta.
+
+------------------------------------------------------------------------------------------------------------ 
+---BASIC FORMATTING DATA TYPES
+ 
+ALTER TABLE adjust_raw_data---statement successful, date format altered
+ALTER COLUMN DATE TYPE DATE
+  USING DATE::DATE
+  
+select * from adjust_raw_data order by purchase_revenue desc---testing
+
+ALTER TABLE meta_raw_data----statement successful, altered date and json spend col.
+  ALTER COLUMN DATE TYPE DATE
+  USING DATE::DATE  
+  ALTER COLUMN spend TYPE NUMERIC
+        USING REPLACE(
+            NULLIF(spend::JSONB #>> '{}', ''),
+            ',',
+            ''
+        )::NUMERIC;
+select * from meta_raw_data---testing
+
+-------------------------------------------------------------------------------------------------------------
+--- Data investigation
+----total rows, total rows with zero spent, imp,clicks, revenue, and pct%
+--------------------------------------------------------------------------------------------------------------
+SELECT
+    column_name ,
+    COUNT(*) OVER () AS total_columns
+FROM information_schema.columns
+WHERE table_name = 'adjust_raw_data' 
+  AND table_schema = 'public'
+ORDER BY ordinal_position
+
+------------------------------------------------------------------------------------------------------------
+---Data investigation
+---date,platform,country,campaign,adset,ad,spend,clicks,imp
+------------------------------------------------------------------------------------------------------------
+SELECT
+    column_name 
+FROM information_schema.columns 
+WHERE table_name = 'meta_raw_data' 
+  AND table_schema = 'public'
+ORDER BY ordinal_position
+
+----------------------------------------------------------------------------------------------------
+----Check for nulls, n/a , or blanks
+----------------------------------------------------------------------------------------------------
+
+SELECT
+    'adjust_raw_data' AS table_name,
+    COUNT(*) FILTER (
+        WHERE campaign IS NULL OR UPPER(TRIM(campaign)) IN ('N/A', '')
+    ) AS campaign_missing,
+    COUNT(*) FILTER (
+        WHERE adset IS NULL OR UPPER(TRIM(adset)) IN ('N/A', '')
+    ) AS adset_missing,
+    COUNT(*) FILTER (
+        WHERE ad IS NULL OR UPPER(TRIM(ad)) IN ('N/A', '')
+    ) AS ad_missing
+FROM adjust_raw_data
+
+UNION ALL
+
+SELECT
+    'meta_raw_data' AS table_name,
+    COUNT(*) FILTER (
+        WHERE campaign IS NULL OR UPPER(TRIM(campaign)) IN ('N/A', '')
+    ) AS campaign_missing,
+    COUNT(*) FILTER (
+        WHERE adset IS NULL OR UPPER(TRIM(adset)) IN ('N/A', '')
+    ) AS adset_missing,
+    COUNT(*) FILTER (
+        WHERE ad IS NULL OR UPPER(TRIM(ad)) IN ('N/A', '')
+    ) AS ad_missing
+FROM meta_raw_data;
+
+
+
+------------------------------------------------------------------------------------------------------------
+---% of zero spend, clicks etc
+------------------------------------------------------------------------------------------------------------
+
+SELECT
+    COUNT(*) AS total_rows,
+    COUNT(*) FILTER (WHERE spend = 0) AS zero_spend_rows,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE spend = 0)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS pct_zero_spend,
+    COUNT(*) FILTER (WHERE impressions = 0) AS zero_impressions_rows,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE impressions = 0)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS pct_zero_imp,
+    COUNT(*) FILTER (WHERE clicks = 0) AS zero_clicks_rows,
+      ROUND(
+        100.0 * COUNT(*) FILTER (WHERE clicks = 0)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS pct_zero_clicks,
+  COUNT(*) FILTER (WHERE d0_purchase_revenue = 0) AS d0_purchase_revenue,
+  ROUND(
+        100.0 * COUNT(*) FILTER (WHERE d0_purchase_revenue = 0)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS  pct_d0_purchase_revenue,
+  COUNT(*) FILTER (WHERE d0_purchase_revenue = 0) AS d30_purchase_revenue,
+  ROUND(
+        100.0 * COUNT(*) FILTER (WHERE d30_purchase_revenue = 0)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS  pct_d30_purchase_revenue
+    
+FROM adjust_raw_data;
+
+
+
+SELECT
+    COUNT(*) AS total_rows,
+    COUNT(*) FILTER (WHERE spend = 0) AS zero_spend_rows,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE spend = 0)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS pct_zero_spend,
+    COUNT(*) FILTER (WHERE impressions = 0) AS zero_impressions_rows,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE impressions = 0)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS pct_zero_imp,
+    COUNT(*) FILTER (WHERE clicks = 0) AS zero_clicks_rows,
+      ROUND(
+        100.0 * COUNT(*) FILTER (WHERE clicks = 0)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS pct_zero_clicks 
+   
+FROM meta_raw_data
+
+------------------------------------------------------------------------------------------------------------
+----EXACT ROW DUPLICATES 
+---excluding the 0 rows, now the question is - do we exlude 0 spend rows or not? o
+  ---more in depht campaign investigation needed, what are the two datasets? 
+------------------------------------------------------------------------------------------------------------
+SELECT
+    to_jsonb(t) AS full_row,
+    COUNT(*) AS occurrences
+FROM adjust_raw_data AS t
+WHERE spend > 0  ----there are 33 occurances if spend changes, spend can be 0, but there are installs, and revenue - rows needed
+GROUP BY to_jsonb(t)
+HAVING COUNT(*) > 1
+ORDER BY occurrences DESC
+
+-----
+SELECT
+    to_jsonb(t) AS full_row,
+    COUNT(*) AS occurrences
+FROM meta_raw_data AS t
+WHERE spend > 0 
+GROUP BY to_jsonb(t)
+HAVING COUNT(*) > 1
+ORDER BY occurrences DESC
+---------------------------------------------------------------------------------------------------------
+---Country to match country, and campaign to match campaign, need campaign id string
+ ------------------------------------------------------------------------------------------------------------  
+    SELECT
+    campaign, country,sum(spend) as total_spend   ----country -'unknown' to be taken from campaign, total 25 campaigns, 200k spend
+FROM meta_raw_data group by campaign ,country
+
+ SELECT
+country,sum(spend) as total_spend   ----country -'unknown' to be taken from campaign, total 25 campaigns, 200k spend
+FROM meta_raw_data group by  country ORDER BY total_spend desc
+
+
+
+ SELECT
+campaign,country,sum(installs) as total_inst   ----1.3k rows - assuming only matches with US, CA, AUD should be analysed, to do mapping tables
+FROM adjust_raw_data group by  campaign,country ORDER BY total_inst desc
+  
+---------------------------------------------------------------------------------------------------------
+---MODEL
+------------------------------------------------------------------------------------------------------------
+select distinct os from adjust_raw_data
+select * from meta_raw_data where campaign ilike '%tv%'  ---testing if tv naming exists, 0 returns
+select * from adjust_raw_data where os ilike '%tv%'  --1 row, no indication in campaign naming
+  
