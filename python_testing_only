@@ -148,6 +148,11 @@ m["purchase_revenue"] = 0
 m["day_0"] = 0
 m["day_30"] = 0
 
+# ---------- REMOVE ADWORDS (Adjust only, applied to the model table) ----------
+adwords_mask = a["partner"].astype(str).str.contains("adwords", case=False, na=False)
+print("adwords rows removed from adjust:", int(adwords_mask.sum()), "of", len(a))
+a = a[~adwords_mask].copy()
+
 # Fill missing ids so groupby doesn't drop them
 a["campaign_id"] = a["campaign_id"].astype(object).fillna("Uncategorised")
 m["campaign_id"] = m["campaign_id"].astype(object).fillna("Uncategorised")
