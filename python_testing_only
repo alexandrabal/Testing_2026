@@ -1,0 +1,197 @@
+import pandas as pd
+import csv
+
+# ---------- LOAD ----------
+adjust = pd.read_csv("/content/sample_data/Adjust raw data - Adjust raw data.csv")
+meta = pd.read_csv("/content/sample_data/Meta raw data.csv")
+
+# ---------- BASIC FORMATTING ----------
+# format="mixed" avoids the "Could not infer format" UserWarning
+adjust["date"] = pd.to_datetime(adjust["date"], format="mixed").dt.date
+meta["date"] = pd.to_datetime(meta["date"], format="mixed").dt.date
+
+# Meta spend is JSON text with commas -> numeric
+meta["spend"] = pd.to_numeric(
+    meta["spend"].astype(str).str.strip('"').str.replace(",", "", regex=False),
+    errors="coerce",
+)
+
+# Clean up any residual quote characters from column values that might remain due to disabled quoting
+for df in [adjust, meta]:
+    for col in df.select_dtypes(include='object').columns:
+        df[col] = df[col].astype(str).str.strip('"')
+
+# ---------- COUNTRY MAPPING TABLE ----------
+# One row per raw value (abbreviation or full name) -> standard country name + code.
+# Add rows here if the printout below shows values that are not mapped.
+country_map = pd.DataFrame(
+    [
+        # raw_value,                  country,         country_code
+        ("US",                        "United States", "US"),
+        ("USA",                       "United States", "US"),
+        ("UNITED STATES",             "United States", "US"),
+        ("UNITED STATES OF AMERICA",  "United States", "US"),
+        ("CA",                        "Canada",        "CA"),
+        ("CAN",                       "Canada",        "CA"),
+        ("CANADA",                    "Canada",        "CA"),
+        ("AU",                        "Australia",     "AU"),
+        ("AUS",                       "Australia",     "AU"),
+        ("AUSTRALIA",                 "Australia",     "AU"),
+    ],
+    columns=["raw_value", "country", "country_code"],
+)
+
+print("Raw countries before mapping")
+print("adjust:", sorted(adjust["country"].unique().tolist()))
+print("meta  :", sorted(meta["country"].unique().tolist()))
+
+
+def map_country(df, name):
+    df = df.copy()
+    df["raw_value"] = df["country"].str.strip().str.upper()
+    # inner merge = keeps only the three mapped markets (US, Canada, Australia)
+    mapped = df.drop(columns=["country"]).merge(country_map, on="raw_value", how="inner")
+    dropped = df.loc[~df["raw_value"].isin(country_map["raw_value"]), "country"].unique()
+    print(name, "rows kept:", len(mapped), "of", len(df), "| dropped values:", sorted(dropped.tolist()))
+    return mapped.drop(columns=["raw_value"])
+
+
+adjust = map_country(adjust, "adjust")
+meta = map_country(meta, "meta")
+
+# ---------- CLEANSED CAMPAIGN ID ----------
+# Look at real names first so the delimiter/part below can be set correctly
+print("Sample adjust campaigns:", adjust["campaign"].head(5).tolist())
+print("Sample meta campaigns  :", meta["campaign"].head(5).tolist())
+
+# Adjust: equivalent of substring(campaign from '[(]([0-9]+)[)]')
+adjust["campaign_id"] = adjust["campaign"].astype(str).str.extract(r"[(]([0-9]+)[)]")[0]
+
+# Meta: equivalent of trim(split_part(campaign, DELIM, PART))
+# SQL split_part is 1-based, Python is 0-based -> SQL part 2 = META_PART 1
+META_DELIM = "("   # <-- CHANGE to the delimiter your Meta campaign names use
+META_PART = 1      # <-- 0-based index (SQL split_part(..., 2) == 1)
+
+meta["campaign_id"] = (
+    meta["campaign"].astype(str)
+    .str.split(META_DELIM).str.get(META_PART)   # .get() returns NaN if part is missing (no crash)
+    .astype("string")                           # keeps .str methods valid even if all NaN
+    .str.strip()
+    .str.extract(r"([0-9]+)")[0]                # digits only so both sides are comparable
+)
+
+# Quick match check
+a_ids, m_ids = set(adjust["campaign_id"].dropna()), set(meta["campaign_id"].dropna())
+print("adjust ids:", len(a_ids), "| meta ids:", len(m_ids), "| matched:", len(a_ids & m_ids))
+print("adjust rows w/o id:", adjust["campaign_id"].isna().sum(),
+      "| meta rows w/o id:", meta["campaign_id"].isna().sum())
+
+# ---------- DATA INVESTIGATION ----------
+print("Date ranges")
+print("meta  :", meta["date"].min(), meta["date"].max())
+print("adjust:", adjust["date"].min(), adjust["date"].max())
+
+print("Total columns:", "adjust", adjust.shape[1], "| meta", meta.shape[1])
+
+# nulls / n/a / blanks
+for name, df in [("adjust", adjust), ("meta", meta)]:
+    for col in ["campaign", "adset", "ad"]:
+        missing = (df[col].isna() | df[col].astype(str).str.strip().str.upper().isin(["N/A", ""])).sum()
+        print(name, col, "missing:", missing)
+
+# % zero spend, impressions, clicks (and d0 / d30 revenue for adjust)
+for name, df, cols in [
+    ("adjust", adjust, ["spend", "impressions", "clicks", "d0_purchase_revenue", "d30_purchase_revenue"]),
+    ("meta", meta, ["spend", "impressions", "clicks"]),
+]:
+    for c in cols:
+        # Ensure we convert numeric columns to float first in case QUOTE_NONE left them as strings
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        print(name, c, "zero %:", round(100 * (df[c] == 0).sum() / len(df), 2))
+
+# exact row duplicates (spend > 0)
+print("adjust duplicates (spend > 0):", adjust[adjust["spend"] > 0].duplicated().sum())
+print("meta duplicates (spend > 0):", meta[meta["spend"] > 0].duplicated().sum())
+
+# os checks
+print(adjust["os"].unique())
+print("meta campaigns with 'tv':", meta["campaign"].str.contains("tv", case=False).sum())
+print("adjust rows with os 'tv':", adjust["os"].str.contains("tv", case=False, na=False).sum())
+
+# ---------- MODEL ----------
+# Adjust side
+a = adjust.rename(columns={
+    "spend": "total_spend",
+    "impressions": "total_impressions",
+    "clicks": "total_clicks",
+    "installs": "total_installs",
+    "purchases": "total_purchases",
+    "d0_purchase_revenue": "day_0",
+    "d30_purchase_revenue": "day_30",
+})
+
+# Meta side: missing dimensions = 'Uncategorised', missing metrics = 0, os from campaign name
+m = meta.rename(columns={
+    "spend": "total_spend",
+    "impressions": "total_impressions",
+    "clicks": "total_clicks",
+})
+
+
+def get_os(campaign):
+    c = str(campaign).lower()
+    if "android" in c:
+        return "android"
+    if "ios" in c:
+        return "ios"
+    return "Uncategorised"
+
+
+m["os"] = m["campaign"].apply(get_os)
+m["partner"] = "facebook"
+m["total_installs"] = 0
+m["total_purchases"] = 0
+m["purchase_revenue"] = 0
+m["day_0"] = 0
+m["day_30"] = 0
+
+# Fill missing ids so groupby doesn't drop them
+a["campaign_id"] = a["campaign_id"].astype(object).fillna("Uncategorised")
+m["campaign_id"] = m["campaign_id"].astype(object).fillna("Uncategorised")
+
+# campaign_id replaces raw campaign name as the dimension;
+# country (standard name) + country_code come from the mapping table
+dims = ["date", "campaign_id", "country", "country_code", "os", "partner",
+        "adset", "ad"]
+metrics = ["total_spend", "total_impressions", "total_clicks", "total_installs",
+           "total_purchases", "purchase_revenue", "day_0", "day_30"]
+
+# UNION ALL (campaign name carried along for reference only)
+union = pd.concat([a[dims + ["campaign"] + metrics],
+                   m[dims + ["campaign"] + metrics]], ignore_index=True)
+
+# ---------- DAILY VIEW ----------
+daily = (union.groupby(dims, dropna=False, as_index=False)
+              .agg({**{k: "sum" for k in metrics}, "campaign": "first"}))
+daily["month"] = pd.to_datetime(daily["date"]).dt.month
+daily["year"] = pd.to_datetime(daily["date"]).dt.year
+daily["unique_key"] = daily["campaign_id"].astype(str) + daily["adset"].astype(str) + daily["ad"].astype(str)
+
+# ---------- MONTHLY VIEW ----------
+monthly_dims = ["year", "month", "unique_key", "campaign_id", "country", "country_code",
+                "os", "partner", "adset", "ad"]
+monthly = (daily.groupby(monthly_dims, dropna=False, as_index=False)
+                .agg({**{k: "sum" for k in metrics}, "campaign": "first"}))
+
+# ---------- SAVE ----------
+daily.to_csv("daily_ad_data.csv", index=False)
+monthly.to_csv("monthly_ad_data.csv", index=False)
+print("Done:", len(daily), "daily rows,", len(monthly), "monthly rows")
+
+from google.colab import files
+
+# Trigger the download for the daily file
+files.download('daily_ad_data.csv')
+
+# Trigger the download for the monthly file
+files.download('monthly_ad_data.csv')
