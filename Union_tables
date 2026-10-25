@@ -1,4 +1,4 @@
-CREATE OR REPLACE VIEW UNION_META_ADJ  AS (with union_table as 
+CREATE OR REPLACE VIEW UNION_META_ADJ_2  AS (with union_table as 
   (SELECT
         -- date,
         EXTRACT(MONTH FROM "date")::int AS month,
@@ -25,7 +25,7 @@ CREATE OR REPLACE VIEW UNION_META_ADJ  AS (with union_table as
                OR campaign ILIKE '%-AND-%'      THEN 'android'
              ELSE 'Uncategorised' END AS os,
       
-       -- 'facebook' AS partner,
+       'facebook' AS partner,
         sum(spend) AS total_spend, 
         sum(impressions) AS total_impressions,
         sum(clicks) AS total_clicks,
@@ -38,7 +38,7 @@ CREATE OR REPLACE VIEW UNION_META_ADJ  AS (with union_table as
         -- 0 AS roas_day_0,
     
     FROM meta_raw_data 
-    GROUP BY 1, 2, 3, 4, 5
+    GROUP BY 1, 2, 3, 4, 5,6
   
 union ALL
  
@@ -58,7 +58,7 @@ union ALL
               WHEN country ='AU' then 'Australia' 
               WHEN country ='CA' then 'Canada' else country END AS country_norm,
         os,
-        -- partner,
+        partner,
         sum(spend) AS total_spend,
         sum(impressions) AS total_impressions,
         sum(clicks) AS total_clicks,
@@ -71,6 +71,6 @@ union ALL
         -- NULLIF(sum(spend),0)/NULLIF(sum(d30_purchase_revenue),0) AS roas_day_30,
         
     FROM adjust_raw_data
-    GROUP BY 1, 2, 3, 4, 5 
+    GROUP BY 1, 2, 3, 4, 5 , 6
  
 ) select * from union_table  )
