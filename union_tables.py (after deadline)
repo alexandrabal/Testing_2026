@@ -1,169 +1,180 @@
 import pandas as pd
+import csv
 
-# =====================================================================
-# DATA CLEANSING: raw Adjust + Meta files -> adjust_clean.csv, meta_clean.csv
-# Every step is logged to an audit table (rows + spend) so nothing is lost silently.
-# =====================================================================
+# ---------- LOAD ----------
+adjust = pd.read_csv("/content/sample_data/Adjust raw data - Adjust raw data.csv")
+meta = pd.read_csv("/content/sample_data/Meta raw data.csv")
 
-ADJUST_PATH = "/content/sample_data/Adjust raw data - Adjust raw data.csv"
-META_PATH = "/content/sample_data/Meta raw data.csv"
+# ---------- BASIC FORMATTING ----------
+# format="mixed" avoids the "Could not infer format" UserWarning
+adjust["date"] = pd.to_datetime(adjust["date"], format="mixed").dt.date
+meta["date"] = pd.to_datetime(meta["date"], format="mixed").dt.date
 
-DROP_EXACT_DUPLICATES = False   # set True to drop exact duplicate rows (spend > 0)
+# Meta spend is JSON text with commas -> numeric
+meta["spend"] = pd.to_numeric(
+    meta["spend"].astype(str).str.strip('"').str.replace(",", "", regex=False),
+    errors="coerce",
+)
 
-# ---------- LOAD (everything as text first, so nothing is silently coerced) ----------
-adjust = pd.read_csv(ADJUST_PATH, dtype=str)
-meta = pd.read_csv(META_PATH, dtype=str)
+# Clean up any residual quote characters from column values that might remain due to disabled quoting
+for df in [adjust, meta]:
+    for col in df.select_dtypes(include='object').columns:
+        df[col] = df[col].astype(str).str.strip('"')
 
-# ---------- AUDIT HELPERS ----------
-audit = []
-
-
-def to_num(s):
-    return pd.to_numeric(
-        s.astype(str).str.strip().str.strip('"').str.replace(",", "", regex=False),
-        errors="coerce",
-    )
-
-
-def log(step, source, df):
-    spend = to_num(df["spend"]).fillna(0).sum() if "spend" in df.columns else float("nan")
-    audit.append({"step": step, "source": source, "rows": len(df), "spend": round(spend, 2)})
-
-
-log("1 raw", "adjust", adjust)
-log("1 raw", "meta", meta)
-
-# ---------- STEP 2: STRIP QUOTES / WHITESPACE FROM ALL TEXT ----------
-for df in (adjust, meta):
-    for col in df.columns:
-        df[col] = df[col].astype(str).str.strip().str.strip('"').str.strip()
-        df[col] = df[col].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
-
-# ---------- STEP 3: DATES ----------
-# format="mixed" copes with mixed date formats; unparseable dates become NaT and are reported
-for name, df in (("adjust", adjust), ("meta", meta)):
-    parsed = pd.to_datetime(df["date"], format="mixed", errors="coerce")
-    print(name, "unparseable dates:", int(parsed.isna().sum()))
-    df["date"] = parsed.dt.date
-
-adjust = adjust[adjust["date"].notna()].copy()
-meta = meta[meta["date"].notna()].copy()
-log("3 valid dates", "adjust", adjust)
-log("3 valid dates", "meta", meta)
-
-# ---------- STEP 4: NUMERIC COLUMNS (commas/quotes removed, bad values -> 0) ----------
-ADJUST_NUM = ["spend", "impressions", "clicks", "installs", "purchases",
-              "purchase_revenue", "d0_purchase_revenue", "d30_purchase_revenue"]
-META_NUM = ["spend", "impressions", "clicks"]
-
-for df, cols in ((adjust, ADJUST_NUM), (meta, META_NUM)):
-    for c in cols:
-        if c in df.columns:
-            df[c] = to_num(df[c]).fillna(0)
-
-# ---------- STEP 5: BLANK / N/A DIMENSIONS -> 'Uncategorised' ----------
-for name, df in (("adjust", adjust), ("meta", meta)):
-    for col in ["campaign", "adset", "ad", "country"]:
-        if col in df.columns:
-            blank = df[col].isna() | df[col].astype(str).str.strip().str.upper().isin(["N/A", "NA", "NULL", ""])
-            print(name, col, "blank / N/A:", int(blank.sum()))
-            df.loc[blank, col] = "Uncategorised"
-
-# ---------- STEP 6: COUNTRY MAPPING + FILTER (US, Canada, Australia) ----------
+# ---------- COUNTRY MAPPING TABLE ----------
+# One row per raw value (abbreviation or full name) -> standard country name + code.
+# Add rows here if the printout below shows values that are not mapped.
 country_map = pd.DataFrame(
     [
-        ("US", "United States", "US"),
-        ("USA", "United States", "US"),
-        ("UNITED STATES", "United States", "US"),
-        ("UNITED STATES OF AMERICA", "United States", "US"),
-        ("CA", "Canada", "CA"),
-        ("CAN", "Canada", "CA"),
-        ("CANADA", "Canada", "CA"),
-        ("AU", "Australia", "AU"),
-        ("AUS", "Australia", "AU"),
-        ("AUSTRALIA", "Australia", "AU"),
+        # raw_value,                  country,         country_code
+        ("US",                        "United States", "US"),
+        ("USA",                       "United States", "US"),
+        ("UNITED STATES",             "United States", "US"),
+        ("UNITED STATES OF AMERICA",  "United States", "US"),
+        ("CA",                        "Canada",        "CA"),
+        ("CAN",                       "Canada",        "CA"),
+        ("CANADA",                    "Canada",        "CA"),
+        ("AU",                        "Australia",     "AU"),
+        ("AUS",                       "Australia",     "AU"),
+        ("AUSTRALIA",                 "Australia",     "AU"),
     ],
     columns=["raw_value", "country", "country_code"],
 )
 
+print("Raw countries before mapping")
+print("adjust:", sorted(adjust["country"].unique().tolist()))
+print("meta  :", sorted(meta["country"].unique().tolist()))
+
 
 def map_country(df, name):
     df = df.copy()
-    df["raw_value"] = df["country"].astype(str).str.strip().str.upper()
+    df["raw_value"] = df["country"].str.strip().str.upper()
+    # inner merge = keeps only the three mapped markets (US, Canada, Australia)
     mapped = df.drop(columns=["country"]).merge(country_map, on="raw_value", how="inner")
     dropped = df.loc[~df["raw_value"].isin(country_map["raw_value"]), "country"].unique()
-    print(name, "countries dropped:", sorted(map(str, dropped)))
+    print(name, "rows kept:", len(mapped), "of", len(df), "| dropped values:", sorted(dropped.tolist()))
     return mapped.drop(columns=["raw_value"])
 
 
 adjust = map_country(adjust, "adjust")
 meta = map_country(meta, "meta")
-log("6 country filter (US/CA/AU)", "adjust", adjust)
-log("6 country filter (US/CA/AU)", "meta", meta)
 
-# ---------- STEP 7: REMOVE ADWORDS (Adjust only) ----------
-adwords_mask = adjust["partner"].astype(str).str.contains("adwords", case=False, na=False)
-print("adjust adwords rows removed:", int(adwords_mask.sum()))
-adjust = adjust[~adwords_mask].copy()
-log("7 adwords removed", "adjust", adjust)
-log("7 adwords removed", "meta", meta)
+# ---------- CLEANSED CAMPAIGN ID ----------
+print("Sample adjust campaigns:", adjust["campaign"].head(5).tolist())
+print("Sample meta campaigns  :", meta["campaign"].head(5).tolist())
 
-# ---------- STEP 8: CLEANSED CAMPAIGN ID ----------
-# Adjust: substring(campaign from '[(]([0-9]+)[)]')
+# Adjust: substring(campaign from '[(]([0-9]+)[)]') AS campaign_id
 adjust["campaign_id"] = adjust["campaign"].astype(str).str.extract(r"[(]([0-9]+)[)]")[0]
-# Meta: trim(split_part(campaign, '|', 1))
-meta["campaign_id"] = meta["campaign"].astype(str).str.split("|").str.get(0).str.strip()
 
-adjust["campaign_id"] = adjust["campaign_id"].astype(object).fillna("Uncategorised")
-meta["campaign_id"] = meta["campaign_id"].astype(object).fillna("Uncategorised")
+# Meta: trim(split_part(campaign, '|', 1)) AS campaign_id
+meta["campaign_id"] = (
+    meta["campaign"].astype(str)
+    .str.split("|").str.get(0)    # SQL part 1 = index 0
+    .str.strip()
+)
 
-a_ids, m_ids = set(adjust["campaign_id"]), set(meta["campaign_id"])
-print("campaign_id -> adjust:", len(a_ids), "| meta:", len(m_ids), "| matched:", len(a_ids & m_ids))
+# Quick match check
+a_ids, m_ids = set(adjust["campaign_id"].dropna()), set(meta["campaign_id"].dropna())
+print("adjust ids:", len(a_ids), "| meta ids:", len(m_ids), "| matched:", len(a_ids & m_ids))
+print("adjust rows w/o id:", adjust["campaign_id"].isna().sum(),
+      "| meta rows w/o id:", meta["campaign_id"].isna().sum())
 
-# ---------- STEP 9: META OS FROM CAMPAIGN NAME, PARTNER ----------
-def get_os(campaign):
-    c = str(campaign).lower()
-    if "android" in c:
-        return "android"
-    if "ios" in c:
-        return "ios"
-    return "Uncategorised"
+# ---------- DATA INVESTIGATION ----------
+print("Date ranges")
+print("meta  :", meta["date"].min(), meta["date"].max())
+print("adjust:", adjust["date"].min(), adjust["date"].max())
 
+print("Total columns:", "adjust", adjust.shape[1], "| meta", meta.shape[1])
 
-meta["os"] = meta["campaign"].apply(get_os)
-meta["partner"] = "facebook"
+# nulls / n/a / blanks
+for name, df in [("adjust", adjust), ("meta", meta)]:
+    for col in ["campaign", "adset", "ad"]:
+        missing = (df[col].isna() | df[col].astype(str).str.strip().str.upper().isin(["N/A", ""])).sum()
+        print(name, col, "missing:", missing)
 
-# ---------- STEP 10: EXACT DUPLICATES ----------
-for name, df in (("adjust", adjust), ("meta", meta)):
-    dupes = int(df[df["spend"] > 0].duplicated().sum())
-    print(name, "exact duplicate rows (spend > 0):", dupes)
+# % zero spend, impressions, clicks (and d0 / d30 revenue for adjust)
+for name, df, cols in [
+    ("adjust", adjust, ["spend", "impressions", "clicks", "d0_purchase_revenue", "d30_purchase_revenue"]),
+    ("meta", meta, ["spend", "impressions", "clicks"]),
+]:
+    for c in cols:
+        # Ensure we convert numeric columns to float first in case QUOTE_NONE left them as strings
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        print(name, c, "zero %:", round(100 * (df[c] == 0).sum() / len(df), 2))
 
-if DROP_EXACT_DUPLICATES:
-    adjust = adjust.drop_duplicates().copy()
-    meta = meta.drop_duplicates().copy()
-    log("10 duplicates removed", "adjust", adjust)
-    log("10 duplicates removed", "meta", meta)
+# exact row duplicates (spend > 0)
+print("adjust duplicates (spend > 0):", adjust[adjust["spend"] > 0].duplicated().sum())
+print("meta duplicates (spend > 0):", meta[meta["spend"] > 0].duplicated().sum())
 
-# ---------- AUDIT OUTPUT ----------
-audit_df = pd.DataFrame(audit)
-print("\nAUDIT TRAIL")
-print(audit_df.to_string(index=False))
+# os checks
+print(adjust["os"].unique())
+print("meta campaigns with 'tv':", meta["campaign"].str.contains("tv", case=False).sum())
+print("adjust rows with os 'tv':", adjust["os"].str.contains("tv", case=False, na=False).sum())
 
-lost = audit_df.pivot(index="step", columns="source", values="spend")
-lost["adjust_spend_lost"] = -lost["adjust"].diff()
-lost["meta_spend_lost"] = -lost["meta"].diff()
-print("\nSPEND LOST PER STEP")
-print(lost)
+# ---------- MODEL ----------
+# Adjust side
+a = adjust.rename(columns={
+    "spend": "total_spend",
+    "impressions": "total_impressions",
+    "clicks": "total_clicks",
+    "installs": "total_installs",
+    "purchases": "total_purchases",
+    "d0_purchase_revenue": "day_0",
+    "d30_purchase_revenue": "day_30",
+})
+
+# Meta side: missing metrics = 0
+m = meta.rename(columns={
+    "spend": "total_spend",
+    "impressions": "total_impressions",
+    "clicks": "total_clicks",
+})
+m["partner"] = "facebook"
+m["total_installs"] = 0
+m["total_purchases"] = 0
+m["purchase_revenue"] = 0
+m["day_0"] = 0
+m["day_30"] = 0
+
+# ---------- REMOVE ADWORDS (Adjust only, applied to the model table) ----------
+adwords_mask = a["partner"].astype(str).str.contains("adwords", case=False, na=False)
+print("adwords rows removed from adjust:", int(adwords_mask.sum()), "of", len(a))
+a = a[~adwords_mask].copy()
+
+# Fill missing ids so groupby doesn't drop them
+a["campaign_id"] = a["campaign_id"].astype(object).fillna("Uncategorised")
+m["campaign_id"] = m["campaign_id"].astype(object).fillna("Uncategorised")
+
+# ---------- UNION, JOINED ON campaign_id ----------
+# Only dimensions that exist identically on both sides are kept, so Adjust and Meta rows
+# with the same date + campaign_id + country collapse into ONE row.
+# (os, partner, adset, ad differ between sources, so they are not part of the key.)
+dims = ["date", "campaign_id", "country", "country_code"]
+metrics = ["total_spend", "total_impressions", "total_clicks", "total_installs",
+           "total_purchases", "purchase_revenue", "day_0", "day_30"]
+
+# UNION ALL
+union = pd.concat([a[dims + metrics],
+                   m[dims + metrics]], ignore_index=True)
+
+# ---------- DAILY VIEW ----------
+daily = union.groupby(dims, dropna=False, as_index=False)[metrics].sum()
+daily["month"] = pd.to_datetime(daily["date"]).dt.month
+daily["year"] = pd.to_datetime(daily["date"]).dt.year
+
+# ---------- MONTHLY VIEW ----------
+monthly_dims = ["year", "month", "campaign_id", "country", "country_code"]
+monthly = daily.groupby(monthly_dims, dropna=False, as_index=False)[metrics].sum()
 
 # ---------- SAVE ----------
-adjust.to_csv("adjust_clean.csv", index=False)
-meta.to_csv("meta_clean.csv", index=False)
-audit_df.to_csv("cleansing_audit.csv", index=False)
-print("\nSaved: adjust_clean.csv", adjust.shape, "| meta_clean.csv", meta.shape, "| cleansing_audit.csv")
+daily.to_csv("daily_ad_data.csv", index=False)
+monthly.to_csv("monthly_ad_data.csv", index=False)
+print("Done:", len(daily), "daily rows,", len(monthly), "monthly rows")
 
-try:
-    from google.colab import files
-    for f in ["adjust_clean.csv", "meta_clean.csv", "cleansing_audit.csv"]:
-        files.download(f)
-except ImportError:
-    pass
+from google.colab import files
+
+# Trigger the download for the daily file
+files.download('daily_ad_data.csv')
+
+# Trigger the download for the monthly file
+files.download('monthly_ad_data.csv')
