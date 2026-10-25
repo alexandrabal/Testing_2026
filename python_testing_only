@@ -123,24 +123,12 @@ a = adjust.rename(columns={
     "d30_purchase_revenue": "day_30",
 })
 
-# Meta side: missing dimensions = 'Uncategorised', missing metrics = 0, os from campaign name
+# Meta side: missing metrics = 0
 m = meta.rename(columns={
     "spend": "total_spend",
     "impressions": "total_impressions",
     "clicks": "total_clicks",
 })
-
-
-def get_os(campaign):
-    c = str(campaign).lower()
-    if "android" in c:
-        return "android"
-    if "ios" in c:
-        return "ios"
-    return "Uncategorised"
-
-
-m["os"] = m["campaign"].apply(get_os)
 m["partner"] = "facebook"
 m["total_installs"] = 0
 m["total_purchases"] = 0
@@ -157,34 +145,26 @@ a = a[~adwords_mask].copy()
 a["campaign_id"] = a["campaign_id"].astype(object).fillna("Uncategorised")
 m["campaign_id"] = m["campaign_id"].astype(object).fillna("Uncategorised")
 
-# campaign_id replaces raw campaign name as the dimension;
-# country (standard name) + country_code come from the mapping table
-dims = ["date", "campaign_id", "country", "country_code", "os", "partner",
-        "adset", "ad"]
+# ---------- UNION, JOINED ON campaign_id ----------
+# Only dimensions that exist identically on both sides are kept, so Adjust and Meta rows
+# with the same date + campaign_id + country collapse into ONE row.
+# (os, partner, adset, ad differ between sources, so they are not part of the key.)
+dims = ["date", "campaign_id", "country", "country_code"]
 metrics = ["total_spend", "total_impressions", "total_clicks", "total_installs",
            "total_purchases", "purchase_revenue", "day_0", "day_30"]
 
-# UNION ALL (campaign name carried along for reference only)
-union = pd.concat([a[dims + ["campaign"] + metrics],
-                   m[dims + ["campaign"] + metrics]], ignore_index=True)
+# UNION ALL
+union = pd.concat([a[dims + metrics],
+                   m[dims + metrics]], ignore_index=True)
 
 # ---------- DAILY VIEW ----------
-daily = (union.groupby(dims, dropna=False, as_index=False)
-              .agg({**{k: "sum" for k in metrics}, "campaign": "first"}))
+daily = union.groupby(dims, dropna=False, as_index=False)[metrics].sum()
 daily["month"] = pd.to_datetime(daily["date"]).dt.month
 daily["year"] = pd.to_datetime(daily["date"]).dt.year
-daily["unique_key"] = daily["campaign_id"].astype(str) + daily["adset"].astype(str) + daily["ad"].astype(str)
 
 # ---------- MONTHLY VIEW ----------
-monthly_dims = ["year", "month", "unique_key", "campaign_id", "country", "country_code",
-                "os", "partner", "adset", "ad"]
-monthly = (daily.groupby(monthly_dims, dropna=False, as_index=False)
-                .agg({**{k: "sum" for k in metrics}, "campaign": "first"}))
-
-# ---------- DROP COLUMNS ----------
-cols_to_drop = ["campaign", "adset", "ad"]
-daily = daily.drop(columns=cols_to_drop)
-monthly = monthly.drop(columns=cols_to_drop)
+monthly_dims = ["year", "month", "campaign_id", "country", "country_code"]
+monthly = daily.groupby(monthly_dims, dropna=False, as_index=False)[metrics].sum()
 
 # ---------- SAVE ----------
 daily.to_csv("daily_ad_data.csv", index=False)
