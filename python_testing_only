@@ -60,24 +60,17 @@ adjust = map_country(adjust, "adjust")
 meta = map_country(meta, "meta")
 
 # ---------- CLEANSED CAMPAIGN ID ----------
-# Look at real names first so the delimiter/part below can be set correctly
 print("Sample adjust campaigns:", adjust["campaign"].head(5).tolist())
 print("Sample meta campaigns  :", meta["campaign"].head(5).tolist())
 
-# Adjust: equivalent of substring(campaign from '[(]([0-9]+)[)]')
+# Adjust: substring(campaign from '[(]([0-9]+)[)]') AS campaign_id
 adjust["campaign_id"] = adjust["campaign"].astype(str).str.extract(r"[(]([0-9]+)[)]")[0]
 
-# Meta: equivalent of trim(split_part(campaign, DELIM, PART))
-# SQL split_part is 1-based, Python is 0-based -> SQL part 2 = META_PART 1
-META_DELIM = "("   # <-- CHANGE to the delimiter your Meta campaign names use
-META_PART = 1      # <-- 0-based index (SQL split_part(..., 2) == 1)
-
+# Meta: trim(split_part(campaign, '|', 1)) AS campaign_id
 meta["campaign_id"] = (
     meta["campaign"].astype(str)
-    .str.split(META_DELIM).str.get(META_PART)   # .get() returns NaN if part is missing (no crash)
-    .astype("string")                           # keeps .str methods valid even if all NaN
+    .str.split("|").str.get(0)    # SQL part 1 = index 0
     .str.strip()
-    .str.extract(r"([0-9]+)")[0]                # digits only so both sides are comparable
 )
 
 # Quick match check
@@ -182,6 +175,11 @@ monthly_dims = ["year", "month", "unique_key", "campaign_id", "country", "countr
                 "os", "partner", "adset", "ad"]
 monthly = (daily.groupby(monthly_dims, dropna=False, as_index=False)
                 .agg({**{k: "sum" for k in metrics}, "campaign": "first"}))
+
+# ---------- DROP COLUMNS ----------
+cols_to_drop = ["campaign", "adset", "ad"]
+daily = daily.drop(columns=cols_to_drop)
+monthly = monthly.drop(columns=cols_to_drop)
 
 # ---------- SAVE ----------
 daily.to_csv("daily_ad_data.csv", index=False)
